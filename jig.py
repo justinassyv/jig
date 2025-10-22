@@ -88,11 +88,11 @@ def read_uart_and_save():
                 decoded = data.decode(errors="ignore")
                 print("📡 UART response:\n", decoded)
                 parsed, duid = parse_uart_data(decoded)
-                # filename = f"{duid}.txt"
-                # with open(filename, "w") as f:
-                #     for k, v in parsed.items():
-                #         f.write(f"{k}: {v}\n")
-                # print(f"✅ Parsed data saved to {filename}")
+                filename = f"{duid}.txt"
+                with open(filename, "w") as f:
+                    for k, v in parsed.items():
+                        f.write(f"{k}: {v}\n")
+                print(f"✅ Parsed data saved to {filename}")
             else:
                 print("⚠️ No UART data received")
     except serial.SerialException as e:
