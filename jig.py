@@ -4,87 +4,114 @@ import subprocess
 import os
 import sys
 import time
+import serial
+
+# ─── Configuration ─────────────────────────────────────────────────────────────
+SCRIPT_PATH = "/home/rpi/Documents/sonora/prog.sh"
+UART_PORT = "/dev/ttyACM0"   # UART device path
+BAUD_RATE = 115200           # UART baud rate
+READ_TIMEOUT = 3             # seconds to listen for UART data
+USE_BOARD = True             # BOARD = physical pins, BCM = GPIO numbers
+RESET_PIN = 7                # Reset signal (BOARD pin 7 = GPIO4)
+RESET_PULSE = 0.1            # seconds to hold reset LOW
 
 # ─── Multiplexer Pin Definitions ───────────────────────────────────────────────
-PIN_A1, PIN_B1, PIN_C1 = 11, 13, 15   # MUX 1 control pins (BOARD numbering)
-PIN_A2, PIN_B2, PIN_C2 = 29, 31, 33   # MUX 2 control pins
-PIN_ENABLE = 18                        # Enable line (always HIGH)
-
-# ─── Helper Functions for MUX Control ──────────────────────────────────────────
-def setup_gpio():
-    """Initialize GPIOs for both multiplexers."""
+if USE_BOARD:
     GPIO.setmode(GPIO.BOARD)
-    for p in [PIN_A1, PIN_B1, PIN_C1, PIN_A2, PIN_B2, PIN_C2, PIN_ENABLE]:
+    PIN_A1, PIN_B1, PIN_C1 = 11, 13, 15
+    PIN_A2, PIN_B2, PIN_C2 = 29, 31, 33
+    PIN_ENABLE = 18
+else:
+    GPIO.setmode(GPIO.BCM)
+    PIN_A1, PIN_B1, PIN_C1 = 17, 27, 22
+    PIN_A2, PIN_B2, PIN_C2 = 5, 6, 13
+    PIN_ENABLE = 24
+
+# ─── Helper Functions ──────────────────────────────────────────────────────────
+def setup_gpio():
+    for p in [PIN_A1, PIN_B1, PIN_C1, PIN_A2, PIN_B2, PIN_C2, PIN_ENABLE, RESET_PIN]:
         GPIO.setup(p, GPIO.OUT)
         GPIO.output(p, GPIO.LOW)
     GPIO.output(PIN_ENABLE, GPIO.HIGH)
-    print(f"GPIO ready, enable pin {PIN_ENABLE} set HIGH")
+    GPIO.output(RESET_PIN, GPIO.HIGH)  # Keep reset released by default
+    print("GPIO initialized")
 
 def select_channel_dual(channel):
-    """
-    Set both MUX 1 and MUX 2 to the same channel (0–7).
-    """
-    if not (0 <= channel <= 7):
-        raise ValueError("Channel must be between 0 and 7")
-
-    # Compute 3-bit binary values for A/B/C lines
-    bit_a = channel & 0x01
-    bit_b = (channel & 0x02) >> 1
-    bit_c = (channel & 0x04) >> 2
-
-    # Apply same bits to both MUX 1 and MUX 2
+    """Select same channel on both multiplexers."""
+    bit_a = channel & 1
+    bit_b = (channel >> 1) & 1
+    bit_c = (channel >> 2) & 1
     for (pa, pb, pc) in [(PIN_A1, PIN_B1, PIN_C1), (PIN_A2, PIN_B2, PIN_C2)]:
-        GPIO.output(pa, GPIO.HIGH if bit_a else GPIO.LOW)
-        GPIO.output(pb, GPIO.HIGH if bit_b else GPIO.LOW)
-        GPIO.output(pc, GPIO.HIGH if bit_c else GPIO.LOW)
-
+        GPIO.output(pa, bit_a)
+        GPIO.output(pb, bit_b)
+        GPIO.output(pc, bit_c)
     print(f"Both MUXes → Channel {channel}  (C={bit_c}, B={bit_b}, A={bit_a})")
 
+def pulse_reset():
+    """Pulse reset pin LOW→HIGH."""
+    print("🔁 Resetting target device...")
+    GPIO.output(RESET_PIN, GPIO.LOW)
+    time.sleep(RESET_PULSE)
+    GPIO.output(RESET_PIN, GPIO.HIGH)
+    print("✅ Reset released.")
+
 def cleanup():
-    """Clean up GPIO pins safely."""
     GPIO.output(PIN_ENABLE, GPIO.LOW)
+    GPIO.output(RESET_PIN, GPIO.HIGH)
     GPIO.cleanup()
-    print("GPIO cleaned up.")
+    print("GPIO cleaned up")
 
-# ─── Flashing Function ─────────────────────────────────────────────────────────
-def flash_board(script_path):
-    """Execute prog.sh using bash and return True/False for success."""
-    if not os.path.exists(script_path):
-        print(f"Error: File not found → {script_path}")
+def flash_board():
+    """Run prog.sh to flash device."""
+    if not os.path.exists(SCRIPT_PATH):
+        print(f"Error: File not found → {SCRIPT_PATH}")
         return False
-
-    os.chmod(script_path, 0o755)
-    work_dir = os.path.dirname(script_path)
+    os.chmod(SCRIPT_PATH, 0o755)
     try:
-        subprocess.run(["bash", script_path], cwd=work_dir, check=True)
+        subprocess.run(["bash", SCRIPT_PATH], cwd=os.path.dirname(SCRIPT_PATH), check=True)
         print("✓ Programming completed successfully")
         return True
     except subprocess.CalledProcessError as e:
         print(f"✗ Flashing failed (exit code {e.returncode})")
         return False
-    except Exception as e:
-        print(f"✗ Unexpected error: {e}")
-        return False
+
+def read_uart():
+    """Read UART output after flashing."""
+    try:
+        with serial.Serial(UART_PORT, BAUD_RATE, timeout=1) as ser:
+            print(f"Listening on {UART_PORT} ({BAUD_RATE} baud)...")
+            start_time = time.time()
+            data = b""
+            while time.time() - start_time < READ_TIMEOUT:
+                if ser.in_waiting:
+                    data += ser.read(ser.in_waiting)
+                time.sleep(0.1)
+            if data:
+                print("📡 UART response:")
+                print(data.decode(errors="ignore"))
+            else:
+                print("⚠️ No UART data received.")
+    except serial.SerialException as e:
+        print(f"⚠️ UART error: {e}")
 
 # ─── Main Logic ────────────────────────────────────────────────────────────────
 def main():
-    script_path = "/home/rpi/Documents/sonora/prog.sh"
     setup_gpio()
-
     try:
-        for ch in range(1, 7):   # channels 1 → 6
-            print(f"\n=== Selecting channel {ch} on BOTH multiplexers ===")
+        for ch in range(1, 7):
+            print(f"\n=== Selecting channel {ch} ===")
             select_channel_dual(ch)
-            time.sleep(0.5)      # allow signals to stabilize
+            time.sleep(0.5)
 
-            print(f"Flashing board on channel {ch}…")
-            if flash_board(script_path):
-                print(f"✓ Board on channel {ch} flashed successfully.")
+            print(f"Flashing board on channel {ch}...")
+            if flash_board():
+                print(f"✓ Board {ch} flashed successfully.")
+                pulse_reset()  # <-- RESET ADDED HERE
+                time.sleep(1.0)
+                read_uart()    # Read UART output after reset
             else:
-                print(f"⚠️ Flash failed on channel {ch}, continuing to next.")
-            time.sleep(1)        # short delay between boards
-
-        print("\n✅ All channels processed successfully.")
+                print(f"⚠️ Flash failed on channel {ch}.")
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\n⛔ User interrupted.")
     finally:
