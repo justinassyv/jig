@@ -2,20 +2,22 @@
 import RPi.GPIO as GPIO
 import subprocess
 import os
-import sys
 import time
 import serial
+
+# Import the parsing function
+from regex_parser import parse_uart_data
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 SCRIPT_PATH = "/home/rpi/Documents/sonora/prog.sh"
 UART_PORT = "/dev/ttyACM0"   # UART device path
 BAUD_RATE = 115200           # UART baud rate
-READ_TIMEOUT = 3             # seconds to listen for UART data
+READ_TIMEOUT = 2             # seconds to listen for UART data
 USE_BOARD = True             # BOARD = physical pins, BCM = GPIO numbers
 RESET_PIN = 7                # Reset signal (BOARD pin 7 = GPIO4)
 RESET_PULSE = 0.1            # seconds to hold reset LOW
 
-# ─── Multiplexer Pin Definitions ───────────────────────────────────────────────
+# ─── Multiplexer Pins ─────────────────────────────────────────────────────────
 if USE_BOARD:
     GPIO.setmode(GPIO.BOARD)
     PIN_A1, PIN_B1, PIN_C1 = 11, 13, 15
@@ -27,17 +29,16 @@ else:
     PIN_A2, PIN_B2, PIN_C2 = 5, 6, 13
     PIN_ENABLE = 24
 
-# ─── Helper Functions ──────────────────────────────────────────────────────────
+# ─── GPIO Setup ───────────────────────────────────────────────────────────────
 def setup_gpio():
     for p in [PIN_A1, PIN_B1, PIN_C1, PIN_A2, PIN_B2, PIN_C2, PIN_ENABLE, RESET_PIN]:
         GPIO.setup(p, GPIO.OUT)
         GPIO.output(p, GPIO.LOW)
     GPIO.output(PIN_ENABLE, GPIO.HIGH)
-    GPIO.output(RESET_PIN, GPIO.HIGH)  # Keep reset released by default
+    GPIO.output(RESET_PIN, GPIO.HIGH)
     print("GPIO initialized")
 
 def select_channel_dual(channel):
-    """Select same channel on both multiplexers."""
     bit_a = channel & 1
     bit_b = (channel >> 1) & 1
     bit_c = (channel >> 2) & 1
@@ -48,12 +49,10 @@ def select_channel_dual(channel):
     print(f"Both MUXes → Channel {channel}  (C={bit_c}, B={bit_b}, A={bit_a})")
 
 def pulse_reset():
-    """Pulse reset pin LOW→HIGH."""
-    print("🔁 Resetting target device...")
     GPIO.output(RESET_PIN, GPIO.LOW)
     time.sleep(RESET_PULSE)
     GPIO.output(RESET_PIN, GPIO.HIGH)
-    print("✅ Reset released.")
+    print("Reset pulse done")
 
 def cleanup():
     GPIO.output(PIN_ENABLE, GPIO.LOW)
@@ -61,8 +60,8 @@ def cleanup():
     GPIO.cleanup()
     print("GPIO cleaned up")
 
+# ─── Flashing & UART ─────────────────────────────────────────────────────────
 def flash_board():
-    """Run prog.sh to flash device."""
     if not os.path.exists(SCRIPT_PATH):
         print(f"Error: File not found → {SCRIPT_PATH}")
         return False
@@ -75,8 +74,7 @@ def flash_board():
         print(f"✗ Flashing failed (exit code {e.returncode})")
         return False
 
-def read_uart():
-    """Read UART output after flashing."""
+def read_uart_and_save():
     try:
         with serial.Serial(UART_PORT, BAUD_RATE, timeout=1) as ser:
             print(f"Listening on {UART_PORT} ({BAUD_RATE} baud)...")
@@ -87,14 +85,20 @@ def read_uart():
                     data += ser.read(ser.in_waiting)
                 time.sleep(0.1)
             if data:
-                print("📡 UART response:")
-                print(data.decode(errors="ignore"))
+                decoded = data.decode(errors="ignore")
+                print("📡 UART response:\n", decoded)
+                parsed, duid = parse_uart_data(decoded)
+                # filename = f"{duid}.txt"
+                # with open(filename, "w") as f:
+                #     for k, v in parsed.items():
+                #         f.write(f"{k}: {v}\n")
+                # print(f"✅ Parsed data saved to {filename}")
             else:
-                print("⚠️ No UART data received.")
+                print("⚠️ No UART data received")
     except serial.SerialException as e:
         print(f"⚠️ UART error: {e}")
 
-# ─── Main Logic ────────────────────────────────────────────────────────────────
+# ─── Main Logic ───────────────────────────────────────────────────────────────
 def main():
     setup_gpio()
     try:
@@ -105,15 +109,12 @@ def main():
 
             print(f"Flashing board on channel {ch}...")
             if flash_board():
-                print(f"✓ Board {ch} flashed successfully.")
-                pulse_reset()  # <-- RESET ADDED HERE
-                time.sleep(1.0)
-                read_uart()    # Read UART output after reset
+                pulse_reset()
+                time.sleep(0.5)
+                read_uart_and_save()
             else:
                 print(f"⚠️ Flash failed on channel {ch}.")
             time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n⛔ User interrupted.")
     finally:
         cleanup()
 
